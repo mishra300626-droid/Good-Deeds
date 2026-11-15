@@ -9,7 +9,7 @@ import secrets
 import re
 import time
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # =========================================================
 # ONE-TIME ONBOARDING REPLAY FOR TESTING
@@ -263,6 +263,9 @@ DEFAULT_SETTINGS = {
     "motivation_mode": "Growth first",
     "recent_deeds_count": 8,
     "show_account_identifier": True,
+    "daily_goal_target": 3,
+    "weekly_goal_target": 10,
+    "parent_lock_timeout_minutes": 10,
 }
 
 SETTINGS_WIDGET_KEYS = [
@@ -289,6 +292,9 @@ SETTINGS_WIDGET_KEYS = [
     "settings_reduce_motion",
     "settings_show_account_identifier",
     "settings_child_display_name",
+    "settings_daily_goal_target",
+    "settings_weekly_goal_target",
+    "settings_parent_lock_timeout_minutes",
 ]
 
 THEME_PRESETS = {
@@ -340,11 +346,15 @@ DEFAULT_DATA = {
     },
     "setup_complete": False,
     "parent_tour_completed": False,
-    "child_name": "Aarav",
+    "child_name": "",
     "parent_password_hash": "",
     "points": 0,
     "deeds": [],
     "redemptions": [],
+    "pending_redemptions": [],
+    "reward_request_history": [],
+    "pending_deeds": [],
+    "child_deed_request_history": [],
     "custom_deeds": [],
     "reflections": [],
     "appreciations": [],
@@ -389,6 +399,10 @@ def ensure_data_defaults(loaded):
     for list_key in (
         "deeds",
         "redemptions",
+        "pending_redemptions",
+        "reward_request_history",
+        "pending_deeds",
+        "child_deed_request_history",
         "custom_deeds",
         "reflections",
         "appreciations",
@@ -807,6 +821,59 @@ def apply_saved_appearance():
                 gap: {block_gap};
             }}
 
+            /* Card-style metrics and a more polished responsive layout. */
+            [data-testid="stMetric"] {{
+                background: var(--gd-card) !important;
+                border: 1px solid rgba(127,127,127,0.22) !important;
+                border-radius: var(--gd-radius) !important;
+                padding: 0.8rem 1rem !important;
+                box-shadow: {shadow_css} !important;
+            }}
+
+            [data-testid="stMetricLabel"] {{
+                font-weight: 650 !important;
+                opacity: 0.88;
+            }}
+
+            [data-testid="stMetricValue"] {{
+                font-weight: 800 !important;
+                letter-spacing: -0.025em;
+            }}
+
+            [data-testid="stVerticalBlockBorderWrapper"] {{
+                border-radius: var(--gd-radius) !important;
+                border-color: rgba(127,127,127,0.25) !important;
+            }}
+
+            div.stButton > button,
+            div.stDownloadButton > button {{
+                font-weight: 650 !important;
+                transition: box-shadow 140ms ease, transform 140ms ease;
+            }}
+
+            div.stButton > button:hover,
+            div.stDownloadButton > button:hover {{
+                box-shadow: 0 4px 12px rgba(0,0,0,0.12) !important;
+                transform: translateY(-1px);
+            }}
+
+            [data-testid="stTabs"] button {{
+                border-radius: 10px 10px 0 0 !important;
+                font-weight: 650 !important;
+            }}
+
+            @media (max-width: 768px) {{
+                [data-testid="stMetric"] {{
+                    padding: 0.6rem 0.7rem !important;
+                }}
+                [data-testid="stMetricValue"] {{
+                    font-size: 1.15rem !important;
+                }}
+                div[data-testid="stHorizontalBlock"] {{
+                    gap: 0.55rem !important;
+                }}
+            }}
+
             /* Compact three-dot settings control in the top-right header. */
             div[data-testid="stPopover"] > button {{
                 min-width: 2.75rem !important;
@@ -850,21 +917,49 @@ apply_saved_appearance()
 # =========================================================
 
 def hash_parent_password(password):
-    return hashlib.sha256(
-        password.encode("utf-8")
-    ).hexdigest()
+    """Hash parent passwords with salted PBKDF2 (with legacy compatibility)."""
+    iterations = 310_000
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        str(password).encode("utf-8"),
+        salt,
+        iterations,
+    )
+    return f"pbkdf2_sha256${iterations}${salt.hex()}${digest.hex()}"
 
 
 def check_parent_password(password):
-    stored_hash = data.get(
-        "parent_password_hash",
-        "",
-    )
+    """Verify new PBKDF2 hashes and upgrade old SHA-256 hashes on success."""
+    stored_hash = str(data.get("parent_password_hash", "") or "")
+    if not stored_hash:
+        return False
 
-    return (
-        bool(stored_hash)
-        and hash_parent_password(password) == stored_hash
-    )
+    if stored_hash.startswith("pbkdf2_sha256$"):
+        try:
+            algorithm, iterations_text, salt_hex, digest_hex = stored_hash.split("$", 3)
+            if algorithm != "pbkdf2_sha256":
+                return False
+            iterations = int(iterations_text)
+            salt = bytes.fromhex(salt_hex)
+            expected = bytes.fromhex(digest_hex)
+            actual = hashlib.pbkdf2_hmac(
+                "sha256",
+                str(password).encode("utf-8"),
+                salt,
+                iterations,
+            )
+            return hmac.compare_digest(actual, expected)
+        except (ValueError, TypeError):
+            return False
+
+    # Existing accounts used a plain SHA-256 hash. Verify it, then upgrade it.
+    legacy_digest = hashlib.sha256(str(password).encode("utf-8")).hexdigest()
+    if hmac.compare_digest(legacy_digest, stored_hash):
+        data["parent_password_hash"] = hash_parent_password(password)
+        save_data(data)
+        return True
+    return False
 
 
 def valid_email(email):
@@ -970,6 +1065,9 @@ if "logged_in" not in st.session_state:
 
 if "parent_authenticated" not in st.session_state:
     st.session_state.parent_authenticated = False
+
+if "parent_last_activity" not in st.session_state:
+    st.session_state.parent_last_activity = 0.0
 
 if "auth_stage" not in st.session_state:
     st.session_state.auth_stage = "identifier"
@@ -1215,6 +1313,7 @@ if not st.session_state.logged_in:
 
                     st.session_state.logged_in = True
                     st.session_state.parent_authenticated = False
+                    st.session_state.parent_last_activity = 0.0
                     st.session_state["dashboard_mode"] = "👦 Child Dashboard"
                     st.session_state["parent_tour_step"] = 0
                     st.session_state.auth_stage = "identifier"
@@ -1296,11 +1395,11 @@ if (
                     "Please enter the child's name."
                 )
 
-            elif len(parent_password) < 4:
+            elif len(parent_password) < 8:
 
                 st.error(
                     "Please choose a Parent Dashboard password "
-                    "with at least 4 characters."
+                    "with at least 8 characters."
                 )
 
             elif parent_password != confirm_parent_password:
@@ -1324,6 +1423,7 @@ if (
                 save_data(data)
 
                 st.session_state.parent_authenticated = True
+                st.session_state.parent_last_activity = time.time()
                 st.session_state["dashboard_mode"] = "👨‍👩‍👦 Parent Dashboard"
                 st.session_state["parent_tour_step"] = 0
 
@@ -1360,6 +1460,222 @@ def get_level(points):
         return "💎 Legend"
 
 
+def parse_deed_datetime(value):
+    """Parse the date formats used by current and older deed records."""
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            pass
+        for date_format in (
+            "%d %b %Y, %I:%M %p",
+            "%d %b %Y",
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d",
+        ):
+            try:
+                return datetime.strptime(value, date_format)
+            except ValueError:
+                continue
+    return None
+
+
+def get_progress_summary():
+    """Calculate deed activity, goals, streaks and chart series from history."""
+    today = datetime.now().date()
+    week_start = today - timedelta(days=today.weekday())
+    parsed_dates = []
+    total_points_earned = 0
+
+    for deed in data.get("deeds", []):
+        parsed = parse_deed_datetime(deed.get("date", ""))
+        if parsed:
+            parsed_dates.append(parsed.date())
+        total_points_earned += safe_int(deed.get("points", 0), 0, 0, 1_000_000)
+
+    date_counts = {}
+    weekday_counts = {}
+    for deed_date in parsed_dates:
+        date_counts[deed_date] = date_counts.get(deed_date, 0) + 1
+        weekday_counts[deed_date.weekday()] = weekday_counts.get(deed_date.weekday(), 0) + 1
+
+    today_count = date_counts.get(today, 0)
+    week_count = sum(
+        count for deed_date, count in date_counts.items()
+        if week_start <= deed_date <= today
+    )
+    active_days = len(date_counts)
+
+    streak_cursor = today if today in date_counts else today - timedelta(days=1)
+    current_streak = 0
+    if streak_cursor in date_counts:
+        while streak_cursor in date_counts:
+            current_streak += 1
+            streak_cursor -= timedelta(days=1)
+
+    weekday_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    if weekday_counts:
+        max_weekday_count = max(weekday_counts.values())
+        most_consistent_day = next(
+            weekday_names[index]
+            for index in range(7)
+            if weekday_counts.get(index, 0) == max_weekday_count
+        )
+        most_consistent_count = max_weekday_count
+    else:
+        most_consistent_day = "—"
+        most_consistent_count = 0
+
+    daily_goal = safe_int(data.get("settings", {}).get("daily_goal_target", 3), 3, 1, 20)
+    weekly_goal = safe_int(data.get("settings", {}).get("weekly_goal_target", 10), 10, 1, 100)
+    last_7_days = [today - timedelta(days=offset) for offset in range(6, -1, -1)]
+    last_30_days = [today - timedelta(days=offset) for offset in range(29, -1, -1)]
+
+    return {
+        "today": today,
+        "today_count": today_count,
+        "week_count": week_count,
+        "daily_goal": daily_goal,
+        "weekly_goal": weekly_goal,
+        "current_streak": current_streak,
+        "active_days": active_days,
+        "total_points_earned": total_points_earned,
+        "most_consistent_day": most_consistent_day,
+        "most_consistent_count": most_consistent_count,
+        "last_7_days": last_7_days,
+        "last_7_counts": [date_counts.get(day, 0) for day in last_7_days],
+        "last_30_days": last_30_days,
+        "last_30_counts": [date_counts.get(day, 0) for day in last_30_days],
+    }
+
+
+def submit_child_deed(name, category, suggested_points, description=""):
+    """Queue a child's deed for parent review without awarding points yet."""
+    request = {
+        "request_id": secrets.token_hex(8),
+        "name": str(name).strip(),
+        "category": str(category).strip(),
+        "suggested_points": safe_int(suggested_points, 0, 0, 1_000_000),
+        "description": str(description or "").strip(),
+        "submitted_at": datetime.now().strftime("%d %b %Y, %I:%M %p"),
+    }
+    data.setdefault("pending_deeds", []).insert(0, request)
+    save_data(data)
+    return request
+
+
+def approve_child_deed(request_id, is_extra_effort=False):
+    request = next(
+        (item for item in data.get("pending_deeds", []) if item.get("request_id") == request_id),
+        None,
+    )
+    if request is None:
+        return False, 0
+
+    awarded_points = add_deed(
+        request.get("name", "Good deed"),
+        request.get("category", "Uncategorised"),
+        request.get("suggested_points", 0),
+        request.get("description", ""),
+        is_extra_effort=bool(is_extra_effort),
+    )
+    data["pending_deeds"] = [
+        item for item in data.get("pending_deeds", [])
+        if item.get("request_id") != request_id
+    ]
+    data.setdefault("child_deed_request_history", []).insert(0, {
+        **request,
+        "status": "Approved",
+        "reviewed_at": datetime.now().strftime("%d %b %Y, %I:%M %p"),
+        "awarded_points": awarded_points,
+    })
+    save_data(data)
+    return True, awarded_points
+
+
+def reject_child_deed(request_id, reason=""):
+    request = next(
+        (item for item in data.get("pending_deeds", []) if item.get("request_id") == request_id),
+        None,
+    )
+    if request is None:
+        return False
+    data["pending_deeds"] = [
+        item for item in data.get("pending_deeds", [])
+        if item.get("request_id") != request_id
+    ]
+    data.setdefault("child_deed_request_history", []).insert(0, {
+        **request,
+        "status": "Needs another try" if reason.strip() else "Not approved",
+        "reviewed_at": datetime.now().strftime("%d %b %Y, %I:%M %p"),
+        "review_note": str(reason or "").strip(),
+    })
+    save_data(data)
+    return True
+
+
+def approve_reward_request(request_id):
+    request = next(
+        (item for item in data.get("pending_redemptions", []) if item.get("request_id") == request_id),
+        None,
+    )
+    if request is None:
+        return False, "This reward request was not found."
+
+    cost = safe_int(request.get("cost", 0), 0, 0, 1_000_000)
+    current_points = safe_int(data.get("points", 0), 0, 0, 10_000_000)
+    if cost <= 0 or current_points < cost:
+        return False, "The current points balance is not enough to approve this request."
+
+    approved_at = datetime.now().strftime("%d %b %Y, %I:%M %p")
+    data["points"] = current_points - cost
+    data.setdefault("redemptions", []).insert(0, {
+        "request_id": request_id,
+        "reward": str(request.get("reward", "Reward")),
+        "cost": cost,
+        "requested_at": request.get("requested_at", ""),
+        "date": approved_at,
+        "status": "Approved",
+    })
+    data["pending_redemptions"] = [
+        item for item in data.get("pending_redemptions", [])
+        if item.get("request_id") != request_id
+    ]
+    data.setdefault("reward_request_history", []).insert(0, {
+        **request,
+        "status": "Approved",
+        "reviewed_at": approved_at,
+    })
+    save_data(data)
+    return True, "Approved"
+
+
+def reject_reward_request(request_id, reason=""):
+    request = next(
+        (item for item in data.get("pending_redemptions", []) if item.get("request_id") == request_id),
+        None,
+    )
+    if request is None:
+        return False
+    data["pending_redemptions"] = [
+        item for item in data.get("pending_redemptions", [])
+        if item.get("request_id") != request_id
+    ]
+    data.setdefault("reward_request_history", []).insert(0, {
+        **request,
+        "status": "Not approved",
+        "reviewed_at": datetime.now().strftime("%d %b %Y, %I:%M %p"),
+        "review_note": str(reason or "").strip(),
+    })
+    save_data(data)
+    return True
+
+
 def get_badges():
     """Badges celebrate participation and variety, not money earned."""
     badges = []
@@ -1387,6 +1703,16 @@ def get_badges():
         badges.append(("🪞", "First Reflection"))
     if len(reflections) >= 5:
         badges.append(("🌿", "Thoughtful Reflector"))
+
+    streak = get_progress_summary().get("current_streak", 0)
+    if streak >= 3:
+        badges.append(("🔥", "3-Day Kindness Streak"))
+    if streak >= 7:
+        badges.append(("⚡", "7-Day Kindness Streak"))
+    if streak >= 14:
+        badges.append(("💫", "14-Day Kindness Streak"))
+    if streak >= 30:
+        badges.append(("🌈", "30-Day Kindness Streak"))
 
     return badges
 
@@ -1442,22 +1768,29 @@ def add_deed(
 
 
 def redeem_reward(reward):
+    """Submit a reward request; points are deducted only after parent approval."""
     try:
-        current_points = max(0, int(data.get("points", 0)))
-        reward_cost = max(0, int(reward.get("cost", 0)))
+        current_points = safe_int(data.get("points", 0), 0, 0, 10_000_000)
+        reward_cost = safe_int(reward.get("cost", 0), 0, 0, 1_000_000)
     except (AttributeError, TypeError, ValueError, OverflowError):
         return False
 
-    if reward_cost <= 0 or current_points < reward_cost:
+    reserved_points = sum(
+        safe_int(item.get("cost", 0), 0, 0, 1_000_000)
+        for item in data.get("pending_redemptions", [])
+    )
+    available_points = max(0, current_points - reserved_points)
+    if reward_cost <= 0 or available_points < reward_cost:
         return False
 
-    data["points"] = current_points - reward_cost
-    redemption = {
+    request = {
+        "request_id": secrets.token_hex(8),
         "reward": str(reward.get("name", "Reward")),
         "cost": reward_cost,
-        "date": datetime.now().strftime("%d %b %Y, %I:%M %p"),
+        "requested_at": datetime.now().strftime("%d %b %Y, %I:%M %p"),
+        "status": "Pending",
     }
-    data.setdefault("redemptions", []).insert(0, redemption)
+    data.setdefault("pending_redemptions", []).insert(0, request)
     save_data(data)
     return True
 
@@ -1486,6 +1819,69 @@ def get_all_deeds_by_category():
         })
 
     return combined
+
+def render_progress_dashboard():
+    """Show family activity charts, progress goals and encouraging streak info."""
+    summary = get_progress_summary()
+    total_deeds = len(data.get("deeds", []))
+
+    with st.container(border=True):
+        st.subheader("📈 Progress, Goals & Streaks")
+        metric_a, metric_b, metric_c, metric_d = st.columns(4)
+        metric_a.metric("⭐ Points earned", summary["total_points_earned"])
+        metric_b.metric("📅 Active days", summary["active_days"])
+        metric_c.metric(
+            "🔥 Current streak",
+            f'{summary["current_streak"]} day' + ("s" if summary["current_streak"] != 1 else ""),
+        )
+        metric_d.metric(
+            "🗓️ Most active weekday",
+            summary["most_consistent_day"],
+            help=f'{summary["most_consistent_count"]} deed(s) recorded on that weekday.',
+        )
+
+        daily_fraction = min(summary["today_count"] / max(1, summary["daily_goal"]), 1.0)
+        weekly_fraction = min(summary["week_count"] / max(1, summary["weekly_goal"]), 1.0)
+        st.progress(
+            daily_fraction,
+            text=f'🎯 Daily goal: {summary["today_count"]} / {summary["daily_goal"]} deeds',
+        )
+        st.progress(
+            weekly_fraction,
+            text=f'🌟 Weekly goal: {summary["week_count"]} / {summary["weekly_goal"]} deeds (Monday–Sunday)',
+        )
+
+        streak = summary["current_streak"]
+        if streak >= 7:
+            st.success(f"⚡ Amazing consistency: {streak} days in a row! Keep kindness enjoyable and balanced.")
+        elif streak >= 3:
+            st.info(f"🔥 Nice momentum: {streak} consecutive days with a good deed.")
+        else:
+            st.caption("Every day is a fresh start. A streak is a fun bonus—not a requirement.")
+
+        chart_left, chart_right = st.columns(2)
+        with chart_left:
+            st.markdown("**Good deeds — last 7 days**")
+            st.bar_chart(
+                {
+                    "Day": [day.strftime("%a %d %b") for day in summary["last_7_days"]],
+                    "Good deeds": summary["last_7_counts"],
+                },
+                x="Day",
+                y="Good deeds",
+            )
+        with chart_right:
+            st.markdown("**Good deeds — last 30 days**")
+            st.line_chart(
+                {
+                    "Date": [day.strftime("%d %b") for day in summary["last_30_days"]],
+                    "Good deeds": summary["last_30_counts"],
+                },
+                x="Date",
+                y="Good deeds",
+            )
+
+
 
 # =========================================================
 # SETTINGS MENU
@@ -1759,6 +2155,31 @@ def render_settings_menu():
             key="settings_show_rewards",
         )
 
+        st.markdown("#### 🎯 Daily & weekly goals")
+        if parent_view_active:
+            daily_goal_target = st.number_input(
+                "Daily good-deed goal",
+                min_value=1,
+                max_value=20,
+                value=safe_int(settings.get("daily_goal_target", 3), 3, 1, 20),
+                step=1,
+                key="settings_daily_goal_target",
+                help="A friendly target; missing a day is not a punishment.",
+            )
+            weekly_goal_target = st.number_input(
+                "Weekly good-deed goal",
+                min_value=1,
+                max_value=100,
+                value=safe_int(settings.get("weekly_goal_target", 10), 10, 1, 100),
+                step=1,
+                key="settings_weekly_goal_target",
+                help="Counts deeds recorded Monday through Sunday.",
+            )
+        else:
+            daily_goal_target = safe_int(settings.get("daily_goal_target", 3), 3, 1, 20)
+            weekly_goal_target = safe_int(settings.get("weekly_goal_target", 10), 10, 1, 100)
+            st.caption("Daily and weekly targets are managed by a parent in Parent Dashboard settings.")
+
         st.divider()
 
         st.markdown("#### ♿ Accessibility")
@@ -1810,6 +2231,23 @@ def render_settings_menu():
             ),
             key="settings_show_account_identifier",
         )
+
+        timeout_options = [5, 10, 15, 30]
+        current_timeout = safe_int(settings.get("parent_lock_timeout_minutes", 10), 10, 5, 30)
+        if current_timeout not in timeout_options:
+            current_timeout = 10
+        if parent_view_active:
+            parent_lock_timeout_minutes = st.selectbox(
+                "Parent Dashboard auto-lock after inactivity",
+                timeout_options,
+                index=timeout_options.index(current_timeout),
+                format_func=lambda minutes: f"{minutes} minutes",
+                key="settings_parent_lock_timeout_minutes",
+                help="The dashboard locks the next time the app is used after this idle period.",
+            )
+        else:
+            parent_lock_timeout_minutes = current_timeout
+            st.caption(f"Parent Dashboard auto-lock: {current_timeout} minutes of inactivity (parent-managed).")
 
         if parent_view_active:
 
@@ -1866,6 +2304,9 @@ def render_settings_menu():
                 "motivation_mode": motivation_mode,
                 "recent_deeds_count": recent_deeds_count,
                 "show_account_identifier": show_account_identifier,
+                "daily_goal_target": int(daily_goal_target),
+                "weekly_goal_target": int(weekly_goal_target),
+                "parent_lock_timeout_minutes": int(parent_lock_timeout_minutes),
             }
 
             if (
@@ -1904,6 +2345,10 @@ def render_settings_menu():
             "redemptions",
             [],
         ),
+        "pending_redemptions": data.get("pending_redemptions", []),
+        "reward_request_history": data.get("reward_request_history", []),
+        "pending_deeds": data.get("pending_deeds", []),
+        "child_deed_request_history": data.get("child_deed_request_history", []),
         "custom_deeds": data.get(
             "custom_deeds",
             [],
@@ -1962,15 +2407,6 @@ def render_settings_menu():
             save_data(data)
             st.rerun()
 
-    if st.session_state.get("parent_authenticated", False):
-        if st.button(
-            "🔒 Lock Parent Dashboard",
-            use_container_width=True,
-        ):
-            st.session_state.parent_authenticated = False
-            st.session_state["dashboard_mode"] = "👦 Child Dashboard"
-            st.rerun()
-
     if st.button(
         "🚪 Log Out",
         use_container_width=True,
@@ -1978,6 +2414,7 @@ def render_settings_menu():
 
         st.session_state.logged_in = False
         st.session_state.parent_authenticated = False
+        st.session_state.parent_last_activity = 0.0
         st.session_state.auth_stage = "identifier"
         st.session_state.active_identifier = ""
         st.session_state.data = copy.deepcopy(DEFAULT_DATA)
@@ -2001,7 +2438,7 @@ PARENT_TOUR_STEPS = [
         "body": "This is the family control centre. Record a deed, add an encouraging note, read your child's optional reflections, and review the history. The Parent Dashboard stays protected by its separate password.",
         "bullets": [
             "Use the dashboard selector in the left sidebar to switch between Child and Parent views.",
-            "Recording a deed is about noticing behaviour; it does not have to create a score.",
+            "A child can submit a deed for parent review; it is recorded only after approval.",
             "Appreciation notes are private encouragement and never award points.",
         ],
     },
@@ -2039,9 +2476,9 @@ PARENT_TOUR_STEPS = [
         "body": "Each family account is stored separately in the app database. Streamlit Cloud local files are not a permanent backup, so use Export family data regularly and keep the backup safe.",
         "bullets": [
             "Use the privacy toggle to hide or show the signed-in email/phone in the sidebar.",
-            "Export family data creates a JSON backup including deeds, rewards, reflections, appreciation notes and settings; it excludes passwords and account credentials.",
+            "Export family data creates a JSON backup including deeds, rewards, approval requests and histories, reflections, appreciation notes and settings; it excludes passwords and account credentials.",
             "Use Replay Parent Welcome Tour in Settings to see this guide again.",
-            "Use Lock Parent Dashboard when stepping away, and Log Out when finished.",
+            "Use the sidebar Lock Parent Dashboard button when stepping away; inactivity also triggers an automatic lock.",
         ],
     },
 ]
@@ -2148,6 +2585,18 @@ if settings.get(
         f"Signed in as: {account_identifier}"
     )
 
+def lock_parent_dashboard():
+    """Lock parent-only access and switch back to the child dashboard."""
+    st.session_state.parent_authenticated = False
+    st.session_state.parent_last_activity = 0.0
+    st.session_state["dashboard_mode"] = "👦 Child Dashboard"
+
+
+# Apply a dashboard switch requested by the timeout check on the prior run,
+# before Streamlit instantiates the dashboard radio widget.
+if st.session_state.pop("_force_child_dashboard", False):
+    st.session_state["dashboard_mode"] = "👦 Child Dashboard"
+
 mode = st.sidebar.radio(
     "Choose Dashboard",
     [
@@ -2156,6 +2605,35 @@ mode = st.sidebar.radio(
     ],
     key="dashboard_mode",
 )
+
+# Selecting the child view ends the parent-authenticated session so the child
+# cannot switch back into parent controls without entering the password again.
+if mode == "👦 Child Dashboard" and st.session_state.parent_authenticated:
+    st.session_state.parent_authenticated = False
+    st.session_state.parent_last_activity = 0.0
+    st.sidebar.caption("🔒 Parent access locked when switching to Child Dashboard.")
+
+# Parent access expires after the configured idle interval. Streamlit checks
+# this on the next app interaction/rerun, then returns to the child dashboard.
+if mode == "👨‍👩‍👦 Parent Dashboard" and st.session_state.parent_authenticated:
+    timeout_minutes = safe_int(
+        data.get("settings", {}).get("parent_lock_timeout_minutes", 10),
+        10,
+        5,
+        30,
+    )
+    last_activity = float(st.session_state.get("parent_last_activity", 0.0) or 0.0)
+    if last_activity and (time.time() - last_activity) >= timeout_minutes * 60:
+        st.session_state.parent_authenticated = False
+        st.session_state.parent_last_activity = 0.0
+        st.session_state["_force_child_dashboard"] = True
+        st.session_state["_parent_timeout_notice"] = True
+        st.rerun()
+    else:
+        st.session_state.parent_last_activity = time.time()
+
+if st.session_state.pop("_parent_timeout_notice", False):
+    st.sidebar.warning("🔒 Parent Dashboard locked after inactivity.")
 
 st.sidebar.divider()
 
@@ -2181,6 +2659,7 @@ if mode == "👨‍👩‍👦 Parent Dashboard":
             ):
 
                 st.session_state.parent_authenticated = True
+                st.session_state.parent_last_activity = time.time()
 
                 st.rerun()
 
@@ -2195,6 +2674,23 @@ if mode == "👨‍👩‍👦 Parent Dashboard":
         st.sidebar.success(
             "✅ Parent access unlocked."
         )
+
+        st.sidebar.button(
+            "🔒 Lock Parent Dashboard",
+            use_container_width=True,
+            help="Lock parent-only access and return to the Child Dashboard.",
+            on_click=lock_parent_dashboard,
+        )
+
+if mode == "👨‍👩‍👦 Parent Dashboard" and st.session_state.parent_authenticated:
+    pending_approval_count = (
+        len(data.get("pending_deeds", []))
+        + len(data.get("pending_redemptions", []))
+    )
+    if pending_approval_count:
+        st.sidebar.warning(f"🔔 {pending_approval_count} approval(s) waiting")
+    else:
+        st.sidebar.caption("🔔 No pending approvals")
 
 # =========================================================
 # BLOCK PARENT ACCESS
@@ -2294,6 +2790,9 @@ if mode == "👦 Child Dashboard":
                 st.progress(1.0)
                 st.write("💎 You have reached the highest level!")
 
+    if settings.get("show_progress", True):
+        render_progress_dashboard()
+
     if settings.get(
         "show_badges",
         True,
@@ -2306,26 +2805,21 @@ if mode == "👦 Child Dashboard":
         badges = get_badges()
 
         if badges:
-
-            badge_cols = st.columns(
-                len(badges)
-            )
-
-            for i, badge in enumerate(
-                badges
-            ):
-
-                with badge_cols[i]:
-
-                    st.markdown(
-                        f"""
-                        <div class="badge-card">
-                            <div style="font-size:35px;">{badge[0]}</div>
-                            <b>{badge[1]}</b>
-                        </div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
+            # Keep badge cards in short rows so they remain readable on phones.
+            for start in range(0, len(badges), 3):
+                badge_batch = badges[start:start + 3]
+                badge_cols = st.columns(len(badge_batch))
+                for offset, badge in enumerate(badge_batch):
+                    with badge_cols[offset]:
+                        st.markdown(
+                            f"""
+                            <div class="badge-card">
+                                <div style="font-size:35px;">{badge[0]}</div>
+                                <b>{badge[1]}</b>
+                            </div>
+                            """,
+                            unsafe_allow_html=True,
+                        )
 
         else:
 
@@ -2379,6 +2873,67 @@ if mode == "👦 Child Dashboard":
             st.info(
                 "No good deeds recorded yet."
             )
+
+    st.divider()
+    st.subheader("📝 Share a Good Deed")
+    st.caption("Tell your parent about a deed you did. It will be reviewed before it is added to your history or earns any points.")
+
+    available_deeds_by_category = get_all_deeds_by_category()
+    submission_categories = list(available_deeds_by_category.keys())
+    submission_category = st.selectbox(
+        "Category",
+        submission_categories,
+        key="child_submission_category",
+    )
+    submission_deeds = available_deeds_by_category[submission_category]
+    with st.form("child_deed_submission_form", clear_on_submit=True):
+        submission_labels = [
+            f'{item["name"]} · {item["points"]} ⭐'
+            for item in submission_deeds
+        ]
+        selected_submission_label = st.selectbox(
+            "Good deed",
+            submission_labels,
+            key=f"child_submission_deed_label_{submission_category}",
+        )
+        selected_submission_index = submission_labels.index(selected_submission_label)
+        selected_submission_deed = submission_deeds[selected_submission_index]
+        submission_description = st.text_area(
+            "Optional details",
+            max_chars=500,
+            placeholder="What did you do? Keep it brief and honest.",
+            key="child_submission_description",
+        )
+        submit_deed_request = st.form_submit_button("📨 Send to Parent for Review")
+
+    if submit_deed_request:
+        submit_child_deed(
+            selected_submission_deed["name"],
+            submission_category,
+            selected_submission_deed["points"],
+            submission_description,
+        )
+        st.success("Your good deed was sent to your parent for review. No points were added yet.")
+        st.rerun()
+
+    with st.expander("📬 My deed submissions"):
+        pending_child_submissions = data.get("pending_deeds", [])
+        reviewed_child_submissions = data.get("child_deed_request_history", [])
+        if pending_child_submissions:
+            st.markdown("**Waiting for parent review**")
+            for request in pending_child_submissions[:10]:
+                st.write(f'⏳ **{request.get("name", "Good deed")}** — {request.get("category", "")}')
+                st.caption(f'Submitted: {request.get("submitted_at", "")}')
+        if reviewed_child_submissions:
+            st.markdown("**Reviewed**")
+            for request in reviewed_child_submissions[:10]:
+                status = request.get("status", "Reviewed")
+                st.write(f'{"✅" if status == "Approved" else "📝"} **{request.get("name", "Good deed")}** — {status}')
+                if request.get("review_note"):
+                    st.caption("Parent note: " + request["review_note"])
+                st.caption(request.get("reviewed_at", ""))
+        if not pending_child_submissions and not reviewed_child_submissions:
+            st.caption("You haven't sent any deeds for review yet.")
 
     st.divider()
     st.subheader("🌱 Reflection Corner")
@@ -2439,30 +2994,27 @@ if mode == "👦 Child Dashboard":
     if settings.get("show_rewards", True) and motivation_mode not in ("Growth first", "No points"):
 
         st.divider()
-
         st.subheader("🎁 Rewards Shop")
 
-        for start in range(
-            0,
-            len(data["rewards"]),
-            3,
-        ):
+        pending_reward_points = sum(
+            safe_int(item.get("cost", 0), 0, 0, 1_000_000)
+            for item in data.get("pending_redemptions", [])
+        )
+        current_reward_points = safe_int(data.get("points", 0), 0, 0, 10_000_000)
+        available_reward_points = max(0, current_reward_points - pending_reward_points)
+        st.caption(
+            f'Balance: {current_reward_points} ⭐ • Reserved for pending requests: '
+            f'{pending_reward_points} ⭐ • Available: {available_reward_points} ⭐'
+        )
 
+        for start in range(0, len(data["rewards"]), 3):
             reward_cols = st.columns(3)
-
-            for offset, reward in enumerate(
-                data["rewards"][
-                    start:start + 3
-                ]
-            ):
-
+            for offset, reward in enumerate(data["rewards"][start:start + 3]):
                 i = start + offset
-
                 with reward_cols[offset]:
                     reward_name = html.escape(str(reward.get("name", "Reward")))
                     reward_emoji = html.escape(str(reward.get("emoji", "🎁")))
                     reward_cost = safe_int(reward.get("cost", 0), 0, 0, 1_000_000)
-
                     st.markdown(
                         f"""
                         <div class="reward-card">
@@ -2473,29 +3025,38 @@ if mode == "👦 Child Dashboard":
                         """,
                         unsafe_allow_html=True,
                     )
-
                     if st.button(
-                        f"Redeem for {reward_cost} ⭐",
+                        f"Request reward · {reward_cost} ⭐",
                         key=f"reward_{i}",
+                        disabled=(available_reward_points < reward_cost),
+                        use_container_width=True,
                     ):
-
-                        if redeem_reward(
-                            reward
-                        ):
-
+                        if redeem_reward(reward):
                             st.success(
-                                f"🎉 You redeemed: "
-                                f"{reward['name']}!"
+                                f'Request sent for {reward.get("name", "Reward")}. '
+                                "A parent must approve it; points are deducted only after approval."
                             )
-
                             st.rerun()
-
                         else:
+                            st.info("You don't have enough available points for this request yet.")
 
-                            st.info(
-                                "There are not enough points for this reward right now. "
-                                "A good deed is still worthwhile without a reward."
-                            )
+        with st.expander("📬 My reward requests"):
+            pending_reward_requests = data.get("pending_redemptions", [])
+            reviewed_reward_requests = data.get("reward_request_history", [])
+            if pending_reward_requests:
+                st.markdown("**Waiting for parent approval**")
+                for request in pending_reward_requests[:10]:
+                    st.write(f'⏳ **{request.get("reward", "Reward")}** — {request.get("cost", 0)} ⭐')
+                    st.caption(f'Requested: {request.get("requested_at", "")}')
+            if reviewed_reward_requests:
+                st.markdown("**Reviewed**")
+                for request in reviewed_reward_requests[:10]:
+                    st.write(f'**{request.get("reward", "Reward")}** — {request.get("status", "Reviewed")}')
+                    if request.get("review_note"):
+                        st.caption("Parent note: " + request["review_note"])
+                    st.caption(request.get("reviewed_at", ""))
+            if not pending_reward_requests and not reviewed_reward_requests:
+                st.caption("You haven't requested a reward yet.")
 
 # =========================================================
 # PARENT DASHBOARD
@@ -2529,6 +3090,97 @@ else:
         "🎁 Rewards Claimed",
         len(data["redemptions"]),
     )
+
+    pending_child_deed_requests = data.get("pending_deeds", [])
+    pending_reward_requests = data.get("pending_redemptions", [])
+    total_pending_approvals = len(pending_child_deed_requests) + len(pending_reward_requests)
+
+    with st.container(border=True):
+        st.subheader("🔔 Parent Notifications")
+        notify_deeds, notify_rewards, notify_total = st.columns(3)
+        notify_deeds.metric("📝 Deeds awaiting review", len(pending_child_deed_requests))
+        notify_rewards.metric("🎁 Reward requests", len(pending_reward_requests))
+        notify_total.metric("📬 Total pending", total_pending_approvals)
+        if total_pending_approvals == 0:
+            st.caption("You're all caught up—no approvals are waiting.")
+        else:
+            st.info("Review the requests below. Points are awarded for a submitted deed only after approval, and reward points are deducted only after reward approval.")
+
+    if pending_child_deed_requests:
+        st.subheader("📨 Child Good-Deed Submissions")
+        for request in pending_child_deed_requests:
+            request_id = str(request.get("request_id", ""))
+            with st.container(border=True):
+                st.markdown(f'**{request.get("name", "Good deed")}** · {request.get("category", "")}')
+                st.caption(f'Submitted: {request.get("submitted_at", "")} · Suggested points: {request.get("suggested_points", 0)} ⭐')
+                if request.get("description"):
+                    st.write(request["description"])
+
+                extra_effort_approval = False
+                if data.get("settings", {}).get("motivation_mode", "Growth first") == "Extra effort only":
+                    extra_effort_approval = st.checkbox(
+                        "This submission qualifies as voluntary extra effort",
+                        key=f"approve_child_deed_extra_{request_id}",
+                    )
+
+                rejection_note = st.text_input(
+                    "Optional note if not approved",
+                    key=f"reject_child_deed_note_{request_id}",
+                    placeholder="e.g. Please tell me a little more about it",
+                )
+                approve_col, reject_col = st.columns(2)
+                with approve_col:
+                    if st.button("✅ Approve deed", key=f"approve_child_deed_{request_id}", use_container_width=True):
+                        approved, awarded_points = approve_child_deed(
+                            request_id,
+                            is_extra_effort=extra_effort_approval,
+                        )
+                        if approved:
+                            if awarded_points:
+                                st.success(f'Deed approved and {awarded_points} ⭐ awarded.')
+                            else:
+                                st.success("Deed approved and recorded. No points were attached under the current motivation settings.")
+                            st.rerun()
+                        else:
+                            st.error("This submission could not be found. Refresh and try again.")
+                with reject_col:
+                    if st.button("📝 Not approved", key=f"reject_child_deed_{request_id}", use_container_width=True):
+                        if reject_child_deed(request_id, rejection_note):
+                            st.success("Submission reviewed. The child can see your note in their submissions.")
+                            st.rerun()
+                        else:
+                            st.error("This submission could not be found. Refresh and try again.")
+
+    if pending_reward_requests:
+        st.subheader("🎁 Reward Requests to Approve")
+        for request in pending_reward_requests:
+            request_id = str(request.get("request_id", ""))
+            with st.container(border=True):
+                st.markdown(f'**{request.get("reward", "Reward")}** — {request.get("cost", 0)} ⭐')
+                st.caption(f'Requested: {request.get("requested_at", "")}')
+                rejection_note = st.text_input(
+                    "Optional note if not approved",
+                    key=f"reject_reward_note_{request_id}",
+                    placeholder="Optional explanation for the child",
+                )
+                approve_col, reject_col = st.columns(2)
+                with approve_col:
+                    if st.button("✅ Approve reward", key=f"approve_reward_{request_id}", use_container_width=True):
+                        approved, message = approve_reward_request(request_id)
+                        if approved:
+                            st.success(f'Reward approved. {request.get("cost", 0)} ⭐ deducted.')
+                            st.rerun()
+                        else:
+                            st.error(message)
+                with reject_col:
+                    if st.button("📝 Not approved", key=f"reject_reward_{request_id}", use_container_width=True):
+                        if reject_reward_request(request_id, rejection_note):
+                            st.success("Reward request reviewed. The child can see your note.")
+                            st.rerun()
+                        else:
+                            st.error("This request could not be found. Refresh and try again.")
+
+    render_progress_dashboard()
 
     st.divider()
     st.subheader("💛 Appreciate without points")
@@ -2905,6 +3557,26 @@ else:
             "No rewards have been redeemed yet."
         )
 
+    with st.expander("📜 Approval Review History"):
+        child_review_history = data.get("child_deed_request_history", [])
+        reward_review_history = data.get("reward_request_history", [])
+        if child_review_history:
+            st.markdown("**Child deed submissions**")
+            for request in child_review_history[:20]:
+                st.write(f'**{request.get("name", "Good deed")}** — {request.get("status", "Reviewed")}')
+                if request.get("review_note"):
+                    st.caption("Note: " + request["review_note"])
+                st.caption(request.get("reviewed_at", ""))
+        if reward_review_history:
+            st.markdown("**Reward requests**")
+            for request in reward_review_history[:20]:
+                st.write(f'🎁 **{request.get("reward", "Reward")}** — {request.get("status", "Reviewed")} ({request.get("cost", 0)} ⭐)')
+                if request.get("review_note"):
+                    st.caption("Note: " + request["review_note"])
+                st.caption(request.get("reviewed_at", ""))
+        if not child_review_history and not reward_review_history:
+            st.caption("No requests have been reviewed yet.")
+
     st.divider()
 
     st.subheader(
@@ -2945,11 +3617,11 @@ else:
                     "is incorrect."
                 )
 
-            elif len(new_password) < 4:
+            elif len(new_password) < 8:
 
                 st.error(
                     "Please choose a new Parent Dashboard password "
-                    "with at least 4 characters."
+                    "with at least 8 characters."
                 )
 
             elif new_password != confirm_password:
