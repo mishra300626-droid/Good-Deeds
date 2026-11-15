@@ -8,6 +8,7 @@ import hmac
 import secrets
 import re
 import time
+import sqlite3
 from datetime import datetime
 
 # =========================================================
@@ -28,7 +29,8 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-DATA_FILE = "good_deeds_data.json"
+DATA_FILE = "good_deeds_data.json"  # legacy single-family file, used for migration only
+ACCOUNTS_DB_FILE = "good_deeds_accounts.db"
 OTP_VALID_SECONDS = 300  # 5 minutes
 
 # =========================================================
@@ -357,59 +359,255 @@ DEFAULT_DATA = {
 }
 
 # =========================================================
-# LOAD / SAVE
+# MULTI-ACCOUNT STORAGE
 # =========================================================
 
-def load_data():
-    """Load family data and safely add defaults for new app versions."""
-    if os.path.exists(DATA_FILE):
-        try:
-            with open(DATA_FILE, "r", encoding="utf-8") as file:
-                loaded = json.load(file)
+def normalize_identifier(identifier):
+    """Normalize account identifiers so email/phone lookups are consistent."""
+    return str(identifier or "").strip().lower()
 
-            if not isinstance(loaded, dict):
-                return copy.deepcopy(DEFAULT_DATA)
 
-            for key, value in DEFAULT_DATA.items():
-                if key not in loaded:
-                    loaded[key] = copy.deepcopy(value)
+def ensure_data_defaults(loaded):
+    """Safely upgrade a family's stored data without deleting existing fields."""
+    if not isinstance(loaded, dict):
+        loaded = copy.deepcopy(DEFAULT_DATA)
 
-            if not isinstance(loaded.get("account"), dict):
-                loaded["account"] = copy.deepcopy(DEFAULT_DATA["account"])
-            for key, value in DEFAULT_DATA["account"].items():
-                loaded["account"].setdefault(key, copy.deepcopy(value))
+    for key, value in DEFAULT_DATA.items():
+        if key not in loaded:
+            loaded[key] = copy.deepcopy(value)
 
-            if not isinstance(loaded.get("settings"), dict):
-                loaded["settings"] = copy.deepcopy(DEFAULT_SETTINGS)
-            for key, value in DEFAULT_SETTINGS.items():
-                loaded["settings"].setdefault(key, copy.deepcopy(value))
+    if not isinstance(loaded.get("account"), dict):
+        loaded["account"] = copy.deepcopy(DEFAULT_DATA["account"])
+    for key, value in DEFAULT_DATA["account"].items():
+        loaded["account"].setdefault(key, copy.deepcopy(value))
 
-            for list_key in ("deeds", "redemptions", "custom_deeds", "reflections", "appreciations", "rewards"):
-                if not isinstance(loaded.get(list_key), list):
-                    loaded[list_key] = copy.deepcopy(DEFAULT_DATA[list_key])
+    if not isinstance(loaded.get("settings"), dict):
+        loaded["settings"] = copy.deepcopy(DEFAULT_SETTINGS)
+    for key, value in DEFAULT_SETTINGS.items():
+        loaded["settings"].setdefault(key, copy.deepcopy(value))
 
-            return loaded
+    for list_key in (
+        "deeds",
+        "redemptions",
+        "custom_deeds",
+        "reflections",
+        "appreciations",
+        "rewards",
+    ):
+        if not isinstance(loaded.get(list_key), list):
+            loaded[list_key] = copy.deepcopy(DEFAULT_DATA[list_key])
 
-        except (json.JSONDecodeError, OSError, TypeError, ValueError):
-            # Keep the app usable if the data file cannot be parsed.
-            # Do not write defaults to disk automatically.
-            return copy.deepcopy(DEFAULT_DATA)
+    return loaded
 
-    return copy.deepcopy(DEFAULT_DATA)
+
+def get_db_connection():
+    """Open the SQLite account database with a reasonable busy timeout."""
+    connection = sqlite3.connect(
+        ACCOUNTS_DB_FILE,
+        timeout=30,
+    )
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA busy_timeout = 30000")
+    return connection
+
+
+def init_accounts_db():
+    """Create the account table if it does not exist yet."""
+    connection = get_db_connection()
+    try:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS family_accounts (
+                identifier TEXT PRIMARY KEY,
+                login_type TEXT NOT NULL,
+                country_code TEXT NOT NULL DEFAULT '',
+                family_data TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def account_exists(identifier):
+    """Return True if a family account is registered for this identifier."""
+    normalized = normalize_identifier(identifier)
+    if not normalized:
+        return False
+
+    connection = get_db_connection()
+    try:
+        row = connection.execute(
+            "SELECT 1 FROM family_accounts WHERE identifier = ?",
+            (normalized,),
+        ).fetchone()
+        return row is not None
+    finally:
+        connection.close()
+
+
+def load_account_data(identifier):
+    """Load one family's data from the database, or None if not registered."""
+    normalized = normalize_identifier(identifier)
+    connection = get_db_connection()
+    try:
+        row = connection.execute(
+            "SELECT family_data FROM family_accounts WHERE identifier = ?",
+            (normalized,),
+        ).fetchone()
+    finally:
+        connection.close()
+
+    if row is None:
+        return None
+
+    try:
+        loaded = json.loads(row["family_data"])
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return copy.deepcopy(DEFAULT_DATA)
+
+    return ensure_data_defaults(loaded)
+
+
+def save_account_record(identifier, family_data):
+    """Persist one family's data without touching any other family's record."""
+    normalized = normalize_identifier(identifier)
+    account = family_data.get("account", {}) if isinstance(family_data, dict) else {}
+    login_type = str(account.get("login_type", "email") or "email")
+    country_code = str(account.get("country_code", "") or "")
+    serialized = json.dumps(
+        family_data,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+    connection = get_db_connection()
+    try:
+        connection.execute(
+            """
+            INSERT INTO family_accounts
+                (identifier, login_type, country_code, family_data, updated_at)
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(identifier) DO UPDATE SET
+                login_type = excluded.login_type,
+                country_code = excluded.country_code,
+                family_data = excluded.family_data,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (normalized, login_type, country_code, serialized),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def create_family_account(identifier, login_type, country_code):
+    """Create a fresh, isolated family profile if the identifier is unused."""
+    normalized = normalize_identifier(identifier)
+    new_data = copy.deepcopy(DEFAULT_DATA)
+    new_data["account_setup_complete"] = True
+    new_data["onboarding_replay_version"] = ONBOARDING_REPLAY_VERSION
+    new_data["account"] = {
+        "login_type": str(login_type),
+        "identifier": normalized,
+        "country_code": str(country_code or ""),
+    }
+
+    connection = get_db_connection()
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        existing = connection.execute(
+            "SELECT 1 FROM family_accounts WHERE identifier = ?",
+            (normalized,),
+        ).fetchone()
+
+        if existing is not None:
+            connection.rollback()
+            return False, None
+
+        serialized = json.dumps(
+            new_data,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        connection.execute(
+            """
+            INSERT INTO family_accounts
+                (identifier, login_type, country_code, family_data)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                normalized,
+                str(login_type),
+                str(country_code or ""),
+                serialized,
+            ),
+        )
+        connection.commit()
+        return True, new_data
+
+    except sqlite3.IntegrityError:
+        connection.rollback()
+        return False, None
+    finally:
+        connection.close()
+
+
+def load_legacy_data():
+    """Read the old single-family JSON file only for migration."""
+    if not os.path.exists(DATA_FILE):
+        return None
+
+    try:
+        with open(DATA_FILE, "r", encoding="utf-8") as file:
+            loaded = json.load(file)
+        if not isinstance(loaded, dict):
+            return None
+        return ensure_data_defaults(loaded)
+    except (json.JSONDecodeError, OSError, TypeError, ValueError):
+        return None
+
+
+def migrate_legacy_account():
+    """Migrate the old family JSON record if it has a usable account identifier."""
+    legacy = load_legacy_data()
+    if not legacy:
+        return
+
+    identifier = normalize_identifier(
+        legacy.get("account", {}).get("identifier", "")
+    )
+    if not identifier or account_exists(identifier):
+        return
+
+    # Keep the existing family history/settings intact during migration.
+    legacy["account"]["identifier"] = identifier
+    save_account_record(identifier, legacy)
 
 
 def save_data(data_to_save):
-    """Write the JSON file atomically to reduce risk of partial saves."""
-    temporary_file = DATA_FILE + ".tmp"
-    with open(temporary_file, "w", encoding="utf-8") as file:
-        json.dump(data_to_save, file, indent=4, ensure_ascii=False)
-        file.flush()
-        os.fsync(file.fileno())
-    os.replace(temporary_file, DATA_FILE)
+    """Save changes to the currently signed-in family's database record."""
+    active_identifier = normalize_identifier(
+        st.session_state.get("active_identifier", "")
+    )
+    if not active_identifier:
+        raise RuntimeError(
+            "Cannot save family data because no account is signed in."
+        )
+    save_account_record(active_identifier, data_to_save)
 
+
+init_accounts_db()
+migrate_legacy_account()
 
 if "data" not in st.session_state:
-    st.session_state.data = load_data()
+    st.session_state.data = copy.deepcopy(DEFAULT_DATA)
+
+if "active_identifier" not in st.session_state:
+    st.session_state.active_identifier = ""
 
 data = st.session_state.data
 
@@ -641,49 +839,11 @@ def apply_saved_appearance():
 apply_saved_appearance()
 
 # =========================================================
-# REPLAY FIRST-TIME EXPERIENCE ONCE, WITHOUT WIPING FAMILY DATA
+# LEGACY ONBOARDING REPLAY REMOVED
 # =========================================================
-
-if data.get(
-    "onboarding_replay_version",
-    0,
-) < ONBOARDING_REPLAY_VERSION:
-
-    # Preserve:
-    # - points
-    # - deed history
-    # - custom good deeds
-    # - rewards and reward history
-    # - appearance/settings
-    # - child's existing display name
-    #
-    # Reset only sign-in / onboarding credentials so this build behaves
-    # like a fresh install one time.
-
-    data["account_setup_complete"] = False
-
-    data["account"] = {
-        "login_type": "",
-        "identifier": "",
-        "country_code": "",
-    }
-
-    data["setup_complete"] = False
-    data["parent_password_hash"] = ""
-    data["parent_tour_completed"] = False
-
-    # Mark replay as consumed immediately so Streamlit reruns do not
-    # repeatedly reset the setup process.
-    data["onboarding_replay_version"] = ONBOARDING_REPLAY_VERSION
-
-    save_data(data)
-
-    # Clear browser-session authentication too.
-    st.session_state.logged_in = False
-    st.session_state.parent_authenticated = False
-    st.session_state.auth_stage = "identifier"
-    st.session_state["dashboard_mode"] = "👦 Child Dashboard"
-    st.session_state["parent_tour_step"] = 0
+# The old replay logic reset the single global account profile. In a
+# multi-account app, onboarding is tracked independently within each family
+# record, so this global reset must not run.
 
 # =========================================================
 # SECURITY HELPERS
@@ -815,7 +975,7 @@ if "auth_stage" not in st.session_state:
     st.session_state.auth_stage = "identifier"
 
 # =========================================================
-# LOGIN / REGISTRATION WITH OTP
+# SIGN IN / SIGN UP WITH OTP
 # =========================================================
 
 if not st.session_state.logged_in:
@@ -827,125 +987,96 @@ if not st.session_state.logged_in:
 
     st.markdown(
         '<div class="login-subtitle">'
-        "Sign in securely with a one-time code"
+        "Sign in to your family account or create a new one"
         "</div>",
         unsafe_allow_html=True,
     )
 
-    left, centre, right = st.columns(
-        [1, 1.5, 1]
+    st.caption(
+        "Prototype notice: OTP codes are currently generated and displayed "
+        "inside the app. This is not real email/SMS verification."
     )
+
+    left, centre, right = st.columns([1, 1.5, 1])
 
     with centre:
 
-        account_exists = data.get(
-            "account_setup_complete",
-            False,
-        )
-
         if st.session_state.auth_stage == "identifier":
 
-            if account_exists:
+            auth_mode = st.radio(
+                "Welcome",
+                ["Sign In", "Sign Up"],
+                horizontal=True,
+                key="auth_mode",
+            )
 
-                st.subheader("Sign in")
+            st.subheader(
+                "Sign in to your account"
+                if auth_mode == "Sign In"
+                else "Create a new family account"
+            )
 
-                saved_type = data.get(
-                    "account",
-                    {},
-                ).get(
-                    "login_type",
-                    "email",
-                )
-
-                login_choices = (
-                    ["📧 Email address"]
-                    if saved_type == "email"
-                    else ["📱 Phone number"]
-                )
-
-                login_type = login_choices[0]
-
-            else:
-
-                st.subheader("Create family account")
-
-                login_type = st.radio(
-                    "Continue using",
-                    [
-                        "📧 Email address",
-                        "📱 Phone number",
-                    ],
-                    horizontal=True,
-                )
+            login_type = st.radio(
+                "Continue using",
+                ["📧 Email address", "📱 Phone number"],
+                horizontal=True,
+                key=f"auth_login_type_{auth_mode}",
+            )
 
             if login_type == "📧 Email address":
 
                 email = st.text_input(
                     "Email address",
                     placeholder="parent@example.com",
+                    key=f"auth_email_{auth_mode}",
                 )
 
-                identifier = email.strip().lower()
+                identifier = normalize_identifier(email)
                 country_code = ""
                 chosen_type = "email"
 
             else:
 
-                labels = list(
-                    COUNTRY_CODES.keys()
-                )
-
-                saved_code = data.get(
-                    "account",
-                    {},
-                ).get(
-                    "country_code",
-                    "+91",
-                )
-
-                default_index = 0
-
-                for idx, label in enumerate(labels):
-                    if COUNTRY_CODES[label] == saved_code:
-                        default_index = idx
-                        break
-
+                labels = list(COUNTRY_CODES.keys())
                 country_label = st.selectbox(
                     "Country / region",
                     labels,
-                    index=default_index,
+                    index=0,
+                    key=f"auth_country_{auth_mode}",
                 )
 
-                country_code = COUNTRY_CODES[
-                    country_label
-                ]
+                country_code = COUNTRY_CODES[country_label]
 
-                c1, c2 = st.columns(
-                    [1, 3]
-                )
+                c1, c2 = st.columns([1, 3])
 
                 with c1:
                     st.text_input(
                         "Code",
                         value=country_code,
                         disabled=True,
+                        key=f"auth_country_code_display_{auth_mode}",
                     )
 
                 with c2:
                     phone = st.text_input(
                         "Phone number",
                         placeholder="9876543210",
+                        key=f"auth_phone_{auth_mode}",
                     )
 
-                identifier = (
-                    country_code
-                    + clean_phone(phone)
+                identifier = normalize_identifier(
+                    country_code + clean_phone(phone)
                 )
-
                 chosen_type = "phone"
 
+            button_label = (
+                "Send Sign-In OTP"
+                if auth_mode == "Sign In"
+                else "Create Account & Send OTP"
+            )
+
             if st.button(
-                "Send OTP",
+                button_label,
                 type="primary",
                 use_container_width=True,
             ):
@@ -953,51 +1084,41 @@ if not st.session_state.logged_in:
                 if chosen_type == "email":
 
                     if not valid_email(identifier):
-                        st.error(
-                            "Please enter a valid email address."
-                        )
+                        st.error("Please enter a valid email address.")
                         st.stop()
 
                 else:
 
-                    digits = clean_phone(
-                        identifier
-                    )
+                    digits = clean_phone(identifier)
 
                     if len(digits) < 8 or len(digits) > 15:
-                        st.error(
-                            "Please enter a valid phone number."
-                        )
+                        st.error("Please enter a valid phone number.")
                         st.stop()
 
-                if account_exists:
+                registered = account_exists(identifier)
 
-                    saved_identifier = data.get(
-                        "account",
-                        {},
-                    ).get(
-                        "identifier",
-                        "",
+                if auth_mode == "Sign Up" and registered:
+                    st.error(
+                        "An account with this email/phone already exists. "
+                        "Please choose Sign In."
                     )
+                    st.stop()
 
-                    if not hmac.compare_digest(
-                        identifier,
-                        saved_identifier,
-                    ):
-                        st.error(
-                            "That email address or phone number "
-                            "is not registered."
-                        )
-                        st.stop()
+                if auth_mode == "Sign In" and not registered:
+                    st.error(
+                        "No account was found for this email/phone. "
+                        "Please choose Sign Up to create one."
+                    )
+                    st.stop()
 
                 st.session_state.pending_identifier = identifier
                 st.session_state.pending_login_type = chosen_type
                 st.session_state.pending_country_code = country_code
+                st.session_state.pending_auth_mode = auth_mode
 
                 issue_otp(identifier)
 
                 st.session_state.auth_stage = "otp"
-
                 st.rerun()
 
         else:
@@ -1006,18 +1127,25 @@ if not st.session_state.logged_in:
                 "pending_identifier",
                 "",
             )
-
-            st.subheader("Enter your OTP")
-
-            st.write(
-                f"We created a 6-digit code for **{identifier}**."
+            pending_auth_mode = st.session_state.get(
+                "pending_auth_mode",
+                "Sign In",
             )
 
-            # LOCAL DEVELOPMENT ONLY
+            st.subheader(
+                "Verify your sign-up code"
+                if pending_auth_mode == "Sign Up"
+                else "Enter your sign-in code"
+            )
+
+            st.write(
+                f"A six-digit demo code was generated for **{identifier}**."
+            )
+
             st.warning(
-                "🧪 Testing mode: because this app is running locally "
-                "and is not connected to an email/SMS service yet, "
-                "your OTP is shown below."
+                "🧪 Demo OTP: the code is shown below because this app "
+                "is not connected to an email or SMS provider yet. "
+                "Do not treat this as secure identity verification."
             )
 
             st.code(
@@ -1031,6 +1159,7 @@ if not st.session_state.logged_in:
                 "6-digit OTP",
                 max_chars=6,
                 placeholder="123456",
+                key="entered_otp",
             )
 
             if st.button(
@@ -1046,32 +1175,51 @@ if not st.session_state.logged_in:
 
                 if success:
 
-                    if not data.get(
-                        "account_setup_complete",
-                        False,
-                    ):
+                    if pending_auth_mode == "Sign Up":
 
-                        data["account"] = {
-                            "login_type": st.session_state.get(
+                        created, new_family_data = create_family_account(
+                            identifier,
+                            st.session_state.get(
                                 "pending_login_type",
                                 "email",
                             ),
-                            "identifier": identifier,
-                            "country_code": st.session_state.get(
+                            st.session_state.get(
                                 "pending_country_code",
                                 "",
                             ),
-                        }
+                        )
 
-                        data["account_setup_complete"] = True
+                        if not created:
+                            st.error(
+                                "This account was registered already. "
+                                "Please return and choose Sign In."
+                            )
+                            st.stop()
 
-                        save_data(data)
+                        st.session_state.active_identifier = identifier
+                        st.session_state.data = new_family_data
+
+                    else:
+
+                        existing_family_data = load_account_data(identifier)
+
+                        if existing_family_data is None:
+                            st.error(
+                                "This account could not be loaded. "
+                                "Please try again."
+                            )
+                            st.stop()
+
+                        st.session_state.active_identifier = identifier
+                        st.session_state.data = existing_family_data
 
                     st.session_state.logged_in = True
+                    st.session_state.parent_authenticated = False
+                    st.session_state["dashboard_mode"] = "👦 Child Dashboard"
+                    st.session_state["parent_tour_step"] = 0
                     st.session_state.auth_stage = "identifier"
 
                     clear_otp()
-
                     st.rerun()
 
                 else:
@@ -1080,7 +1228,6 @@ if not st.session_state.logged_in:
             b1, b2 = st.columns(2)
 
             with b1:
-
                 if st.button(
                     "Send new OTP",
                     use_container_width=True,
@@ -1089,7 +1236,6 @@ if not st.session_state.logged_in:
                     st.rerun()
 
             with b2:
-
                 if st.button(
                     "Change email / phone",
                     use_container_width=True,
@@ -1099,7 +1245,6 @@ if not st.session_state.logged_in:
                     st.rerun()
 
     st.stop()
-
 # =========================================================
 # FIRST-TIME PARENT SETUP
 # =========================================================
@@ -1112,7 +1257,7 @@ if (
     st.title("👨‍👩‍👦 Parent Setup")
 
     st.info(
-        "Your email/phone has been verified. Now a parent or guardian "
+        "Your family account has been created. A parent or guardian "
         "should set up the child's profile and create the separate "
         "Parent Dashboard password."
     )
@@ -1357,7 +1502,7 @@ def render_settings_menu():
     st.markdown("### ⚙️ Settings")
 
     st.caption(
-        "Personalise the app. Changes are saved on this device."
+        "Personalise the app. Changes are saved to this family account."
     )
 
     with st.form("settings_form"):
@@ -1834,6 +1979,8 @@ def render_settings_menu():
         st.session_state.logged_in = False
         st.session_state.parent_authenticated = False
         st.session_state.auth_stage = "identifier"
+        st.session_state.active_identifier = ""
+        st.session_state.data = copy.deepcopy(DEFAULT_DATA)
         st.session_state["dashboard_mode"] = "👦 Child Dashboard"
 
         clear_otp()
@@ -1889,7 +2036,7 @@ PARENT_TOUR_STEPS = [
     },
     {
         "title": "5. Privacy, backup and getting help",
-        "body": "The app currently saves family data in good_deeds_data.json in the folder where the app runs. Keep a backup before moving the app to another computer.",
+        "body": "Each family account is stored separately in the app database. Streamlit Cloud local files are not a permanent backup, so use Export family data regularly and keep the backup safe.",
         "bullets": [
             "Use the privacy toggle to hide or show the signed-in email/phone in the sidebar.",
             "Export family data creates a JSON backup including deeds, rewards, reflections, appreciation notes and settings; it excludes passwords and account credentials.",
