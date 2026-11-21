@@ -793,6 +793,87 @@ def apply_saved_appearance():
                 background: var(--gd-sidebar) !important;
             }}
 
+            /* Accessibility-first colour treatment: theme tokens reach widgets too. */
+            [data-testid="stAppViewContainer"] *,
+            [data-testid="stSidebar"] * {{
+                color: var(--gd-text) !important;
+            }}
+            [data-testid="stSidebar"] > div {{
+                background: var(--gd-sidebar) !important;
+            }}
+            [data-testid="stSidebar"] section,
+            [data-testid="stSidebar"] [data-testid="stVerticalBlock"] {{
+                background: transparent !important;
+            }}
+            [data-testid="stPopover"] [data-testid="stPopoverContent"],
+            [data-testid="stDialog"] > div,
+            [data-testid="stExpander"] details,
+            [data-testid="stVerticalBlockBorderWrapper"] > div {{
+                background: var(--gd-card) !important;
+                color: var(--gd-text) !important;
+                border-color: color-mix(in srgb, var(--gd-text) 22%, transparent) !important;
+            }}
+            /* Inputs, menus, selectboxes and textareas: readable foreground/background. */
+            input, textarea, [data-baseweb="input"], [data-baseweb="textarea"],
+            [data-baseweb="select"] > div, [data-baseweb="popover"],
+            [data-baseweb="menu"], [role="listbox"], [role="option"] {{
+                background: var(--gd-card) !important;
+                color: var(--gd-text) !important;
+                border-color: color-mix(in srgb, var(--gd-text) 28%, transparent) !important;
+            }}
+            input::placeholder, textarea::placeholder {{
+                color: color-mix(in srgb, var(--gd-text) 68%, transparent) !important;
+                opacity: 1 !important;
+            }}
+            /* Alerts were previously inheriting white text on pale alert backgrounds. */
+            [data-testid="stAlert"] {{
+                background: var(--gd-card) !important;
+                border: 1px solid color-mix(in srgb, var(--gd-text) 25%, transparent) !important;
+                border-radius: var(--gd-radius) !important;
+            }}
+            [data-testid="stAlert"] * {{
+                color: var(--gd-text) !important;
+            }}
+            /* Buttons: use accent as a reliable highlight; preserve contrast on secondary buttons. */
+            div.stButton > button, div.stDownloadButton > button,
+            [data-testid="stFormSubmitButton"] button {{
+                color: var(--gd-text) !important;
+                background: var(--gd-card) !important;
+                border: 1px solid color-mix(in srgb, var(--gd-text) 30%, transparent) !important;
+                min-height: {button_height} !important;
+            }}
+            button[kind="primary"], [data-testid="stFormSubmitButton"] button[kind="primary"] {{
+                color: #FFFFFF !important;
+                background: var(--gd-accent) !important;
+                border-color: var(--gd-accent) !important;
+            }}
+            button[kind="primary"] *, [data-testid="stFormSubmitButton"] button[kind="primary"] * {{
+                color: #FFFFFF !important;
+            }}
+            a, a * {{ color: var(--gd-accent) !important; }}
+            [data-testid="stMetric"], [data-testid="stTable"],
+            [data-testid="stDataFrame"] {{
+                background: var(--gd-card) !important;
+                color: var(--gd-text) !important;
+            }}
+            [data-testid="stPopover"] button {{
+                background: var(--gd-card) !important;
+                color: var(--gd-text) !important;
+                border: 1px solid color-mix(in srgb, var(--gd-text) 24%, transparent) !important;
+            }}
+            :focus-visible {{
+                outline: 3px solid var(--gd-accent) !important;
+                outline-offset: 2px !important;
+            }}
+            /* Never make locked-screen notices unreadable in any theme. */
+            .gd-locked-message {{
+                background: var(--gd-card) !important;
+                color: var(--gd-text) !important;
+                border: 1px solid color-mix(in srgb, var(--gd-text) 25%, transparent) !important;
+                padding: 1rem !important;
+                border-radius: var(--gd-radius) !important;
+            }}
+
             .stApp p,
             .stApp label,
             .stApp span,
@@ -802,106 +883,106 @@ def apply_saved_appearance():
             .stApp h4,
             .stApp h5,
             .stApp h6,
-            [data-testid="stMarkdownContainer"] {{
+            [data-testid="stMarkdownContainer"] {{{{
                 color: var(--gd-text);
-            }}
+            }}}}
 
             .reward-card,
             .deed-card,
-            .badge-card {{
+            .badge-card {{{{
                 background: var(--gd-card) !important;
                 color: var(--gd-text) !important;
                 border-radius: var(--gd-radius) !important;
-                box-shadow: {shadow_css} !important;
-            }}
+                box-shadow: {{shadow_css}} !important;
+            }}}}
 
             .reward-card .reward-name,
             .reward-card .reward-cost,
             .deed-card b,
             .deed-card strong,
             .deed-card small,
-            .badge-card b {{
+            .badge-card b {{{{
                 color: var(--gd-text) !important;
-            }}
+            }}}}
 
             div.stButton > button,
             div.stDownloadButton > button,
-            button[kind="primary"] {{
+            button[kind="primary"] {{{{
                 border-radius: var(--gd-radius) !important;
                 min-height: {button_height};
-            }}
+            }}}}
 
-            button[kind="primary"] {{
+            button[kind="primary"] {{{{
                 background: var(--gd-accent) !important;
                 border-color: var(--gd-accent) !important;
-            }}
+            }}}}
 
             div[data-baseweb="input"] > div,
             div[data-baseweb="select"] > div,
-            textarea {{
+            textarea {{{{
                 border-radius: var(--gd-radius) !important;
-                min-height: {input_height};
-            }}
+                min-height: {{input_height}};
+            }}}}
 
-            div[data-testid="stVerticalBlock"] {{
-                gap: {block_gap};
-            }}
+            div[data-testid="stVerticalBlock"] {{{{
+                gap: {{block_gap}};
+            }}}}
 
             /* Card-style metrics and a more polished responsive layout. */
-            [data-testid="stMetric"] {{
+            [data-testid="stMetric"] {{{{
                 background: var(--gd-card) !important;
                 border: 1px solid rgba(127,127,127,0.22) !important;
                 border-radius: var(--gd-radius) !important;
                 padding: 0.8rem 1rem !important;
-                box-shadow: {shadow_css} !important;
-            }}
+                box-shadow: {{shadow_css}} !important;
+            }}}}
 
-            [data-testid="stMetricLabel"] {{
+            [data-testid="stMetricLabel"] {{{{
                 font-weight: 650 !important;
                 opacity: 0.88;
-            }}
+            }}}}
 
-            [data-testid="stMetricValue"] {{
+            [data-testid="stMetricValue"] {{{{
                 font-weight: 800 !important;
                 letter-spacing: -0.025em;
-            }}
+            }}}}
 
-            [data-testid="stVerticalBlockBorderWrapper"] {{
+            [data-testid="stVerticalBlockBorderWrapper"] {{{{
                 border-radius: var(--gd-radius) !important;
                 border-color: rgba(127,127,127,0.25) !important;
-            }}
+            }}}}
 
             div.stButton > button,
-            div.stDownloadButton > button {{
+            div.stDownloadButton > button {{{{
                 font-weight: 650 !important;
                 transition: box-shadow 140ms ease, transform 140ms ease;
-            }}
+            }}}}
 
             div.stButton > button:hover,
-            div.stDownloadButton > button:hover {{
+            div.stDownloadButton > button:hover {{{{
                 box-shadow: 0 4px 12px rgba(0,0,0,0.12) !important;
                 transform: translateY(-1px);
-            }}
+            }}}}
 
-            [data-testid="stTabs"] button {{
+            [data-testid="stTabs"] button {{{{
                 border-radius: 10px 10px 0 0 !important;
                 font-weight: 650 !important;
-            }}
+            }}}}
 
-            @media (max-width: 768px) {{
-                [data-testid="stMetric"] {{
+            @media (max-width: 768px) {{{{
+                [data-testid="stMetric"] {{{{
                     padding: 0.6rem 0.7rem !important;
-                }}
-                [data-testid="stMetricValue"] {{
+                }}}}
+                [data-testid="stMetricValue"] {{{{
                     font-size: 1.15rem !important;
-                }}
-                div[data-testid="stHorizontalBlock"] {{
+                }}}}
+                div[data-testid="stHorizontalBlock"] {{{{
                     gap: 0.55rem !important;
-                }}
-            }}
+                }}}}
+            }}}}
 
             /* Compact gear settings control in the top-right header. */
-            div[data-testid="stPopover"] > button {{
+            div[data-testid="stPopover"] > button {{{{
                 min-width: 2.75rem !important;
                 width: 2.75rem !important;
                 min-height: 2.75rem !important;
@@ -910,26 +991,26 @@ def apply_saved_appearance():
                 font-weight: 700 !important;
                 border-radius: 12px !important;
                 background: var(--gd-card) !important;
-            }}
+            }}}}
 
-            .gd-motivation {{
+            .gd-motivation {{{{
                 background: var(--gd-card);
                 border-left: 5px solid var(--gd-accent);
                 border-radius: var(--gd-radius);
                 padding: 14px 16px;
                 margin: 8px 0 18px 0;
-                box-shadow: {shadow_css};
+                box-shadow: {{shadow_css}};
                 color: var(--gd-text);
-            }}
+            }}}}
 
             /* Keep Streamlit's own toolbar separate from Good Deeds controls.
                The app has its own gear popover; hide platform chrome here. */
-            [data-testid="stToolbar"] {{
+            [data-testid="stToolbar"] {{{{
                 visibility: hidden !important;
                 height: 0 !important;
-            }}
-            #MainMenu {{ visibility: hidden !important; }}
-            footer {{ visibility: hidden !important; }}
+            }}}}
+            #MainMenu {{{{ visibility: hidden !important; }}}}
+            footer {{{{ visibility: hidden !important; }}}}
 
             /* Guided tour: deliberately high contrast, even with custom themes. */
             .gd-tour-text {{
@@ -2790,8 +2871,9 @@ if (
         "This area is only accessible to a parent or guardian."
     )
 
-    st.info(
-        "Enter the Parent Dashboard password in the sidebar to continue."
+    st.markdown(
+        '<div class="gd-locked-message">Enter the Parent Dashboard password in the sidebar to continue.</div>',
+        unsafe_allow_html=True,
     )
 
     st.stop()
