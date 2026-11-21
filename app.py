@@ -900,7 +900,7 @@ def apply_saved_appearance():
                 }}
             }}
 
-            /* Compact three-dot settings control in the top-right header. */
+            /* Compact gear settings control in the top-right header. */
             div[data-testid="stPopover"] > button {{
                 min-width: 2.75rem !important;
                 width: 2.75rem !important;
@@ -920,6 +920,30 @@ def apply_saved_appearance():
                 margin: 8px 0 18px 0;
                 box-shadow: {shadow_css};
                 color: var(--gd-text);
+            }}
+
+            /* Guided tour text stays readable even with custom themes. */
+            .gd-tour-text {{
+                color: var(--gd-text) !important;
+                background: var(--gd-card) !important;
+                border: 1px solid rgba(127,127,127,0.35) !important;
+                border-radius: 12px !important;
+                padding: 14px 16px !important;
+                font-size: 1.05rem !important;
+                line-height: 1.65 !important;
+                font-weight: 500 !important;
+                opacity: 1 !important;
+            }}
+            .gd-tour-text * {{
+                color: var(--gd-text) !important;
+                opacity: 1 !important;
+            }}
+            .gd-tour-bullets ul {{
+                margin: 0.2rem 0 0.2rem 1.2rem !important;
+                padding-left: 1rem !important;
+            }}
+            .gd-tour-bullets li {{
+                margin-bottom: 0.65rem !important;
             }}
 
             {motion_css}
@@ -2478,7 +2502,7 @@ PARENT_TOUR_STEPS = [
     },
     {
         "title": "2. Choose your family's motivation approach",
-        "body": "Open the ⋮ menu at the top-right and find Motivation & rewards in Settings. The default is Growth first, so new deeds are recorded without automatically earning points.",
+        "body": "Open the ⚙️ menu at the top-right and find Motivation & rewards in Settings. The default is Growth first, so new deeds are recorded without automatically earning points.",
         "bullets": [
             "Growth first: deeds are recorded without points; the rewards shop is hidden.",
             "Extra effort only: points are awarded only when a parent explicitly marks a deed as voluntary extra effort.",
@@ -2488,7 +2512,7 @@ PARENT_TOUR_STEPS = [
     },
     {
         "title": "3. Personalise appearance",
-        "body": "The ⋮ menu opens Settings. Changes take effect after you select Save Settings.",
+        "body": "The ⚙️ menu opens Settings. Changes take effect after you select Save Settings.",
         "bullets": [
             "Choose Light, Dark, Warm, Cool or Custom themes, including custom page, sidebar, card and text colours.",
             "Change the font, text size, rounded corners, card shadows and compact layout.",
@@ -2533,15 +2557,23 @@ def render_parent_intro_tour():
 
     with st.container(border=True):
         st.markdown("## 👋 Welcome to Good Deeds — Parent quick tour")
-        st.caption("You will see this guide once. You can replay it later from the ⋮ Settings menu.")
+        st.caption("You will see this guide once. You can replay it later from the ⚙️ Settings menu.")
         st.progress(
             (step_index + 1) / len(PARENT_TOUR_STEPS),
             text=f"Step {step_index + 1} of {len(PARENT_TOUR_STEPS)}",
         )
         st.subheader(step["title"])
-        st.write(step["body"])
-        for bullet in step["bullets"]:
-            st.markdown(f"- {bullet}")
+        st.markdown(
+            f'<div class="gd-tour-text">{html.escape(step["body"])}</div>',
+            unsafe_allow_html=True,
+        )
+        tour_bullets = "".join(
+            f'<li>{html.escape(str(bullet))}</li>' for bullet in step["bullets"]
+        )
+        st.markdown(
+            f'<div class="gd-tour-text gd-tour-bullets"><ul>{tour_bullets}</ul></div>',
+            unsafe_allow_html=True,
+        )
 
         previous_col, next_col, skip_col = st.columns([1, 1.2, 1])
         with previous_col:
@@ -2591,7 +2623,8 @@ header_title_col, header_menu_col = st.columns([12, 1])
 with header_title_col:
     st.markdown("### ⭐ Good Deeds")
 with header_menu_col:
-    with st.popover("⋮", help="Settings, appearance, accessibility and data tools"):
+    with st.popover("⚙️", help="Settings, appearance, accessibility and data tools"):
+
         render_settings_menu()
 
 # =========================================================
@@ -3712,7 +3745,7 @@ else:
 
 
     with parent_settings_tab:
-        st.caption("Change the Parent Dashboard password here. For appearance, goals, motivation, accessibility, and auto-lock preferences, open the ⋮ Settings menu at the top-right.")
+        st.caption("Change the Parent Dashboard password here. For appearance, goals, motivation, accessibility, and auto-lock preferences, open the ⚙️ Settings menu at the top-right.")
         st.subheader(
             "🔑 Change Parent Dashboard Password"
         )
