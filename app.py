@@ -922,21 +922,35 @@ def apply_saved_appearance():
                 color: var(--gd-text);
             }}
 
-            /* Guided tour text stays readable even with custom themes. */
+            /* Keep Streamlit's own toolbar separate from Good Deeds controls.
+               The app has its own gear popover; hide platform chrome here. */
+            [data-testid="stToolbar"] {{
+                visibility: hidden !important;
+                height: 0 !important;
+            }}
+            #MainMenu {{ visibility: hidden !important; }}
+            footer {{ visibility: hidden !important; }}
+
+            /* Guided tour: deliberately high contrast, even with custom themes. */
             .gd-tour-text {{
-                color: var(--gd-text) !important;
-                background: var(--gd-card) !important;
-                border: 1px solid rgba(127,127,127,0.35) !important;
+                color: #172033 !important;
+                background: #FFFFFF !important;
+                border: 2px solid #64748B !important;
                 border-radius: 12px !important;
-                padding: 14px 16px !important;
-                font-size: 1.05rem !important;
-                line-height: 1.65 !important;
-                font-weight: 500 !important;
+                padding: 16px 18px !important;
+                font-size: 1.08rem !important;
+                line-height: 1.7 !important;
+                font-weight: 600 !important;
                 opacity: 1 !important;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.08) !important;
             }}
             .gd-tour-text * {{
-                color: var(--gd-text) !important;
+                color: #172033 !important;
                 opacity: 1 !important;
+            }}
+            .gd-tour-text li {{
+                color: #172033 !important;
+                font-weight: 600 !important;
             }}
             .gd-tour-bullets ul {{
                 margin: 0.2rem 0 0.2rem 1.2rem !important;
@@ -2557,7 +2571,7 @@ def render_parent_intro_tour():
 
     with st.container(border=True):
         st.markdown("## 👋 Welcome to Good Deeds — Parent quick tour")
-        st.caption("You will see this guide once. You can replay it later from the ⚙️ Settings menu.")
+        st.caption("You will see this guide once. You can replay it later from the ⚙️ gear in the app header.")
         st.progress(
             (step_index + 1) / len(PARENT_TOUR_STEPS),
             text=f"Step {step_index + 1} of {len(PARENT_TOUR_STEPS)}",
