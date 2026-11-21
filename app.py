@@ -10,7 +10,7 @@ import re
 import time
 import sqlite3
 from datetime import datetime, timedelta, date
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, available_timezones
 
 # =========================================================
 # TIMEZONE — USER SELECTABLE
@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo
 # Family timezone is selected during parent setup and stored in settings.
 # Older accounts default to Asia/Kolkata (India Standard Time).
 DEFAULT_TIMEZONE = "Asia/Kolkata"
-AVAILABLE_TIMEZONES = sorted(ZoneInfo.available_timezones())
+AVAILABLE_TIMEZONES = sorted(available_timezones())
 
 def get_selected_timezone():
     """Return the family's selected ZoneInfo timezone safely."""
